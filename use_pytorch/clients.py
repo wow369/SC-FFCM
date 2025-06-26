@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import TensorDataset
 from torch.utils.data import DataLoader
 from getData import GetDataSet
+from skfuzzy.cluster import cmeans
 import random
 import operator
 import math
@@ -13,21 +14,19 @@ from numpy import *
 
 #每一个Client对象:
 class client(object):
-    def __init__(self, clusterDataSetFrame, c, init_models, local_max_epoch, cluster_features, server_iter, local_lr, client_control, server_control):
+    def __init__(self, clusterDataSetFrame, c, init_models, local_max_epoch, cluster_features, server_iter, local_lr, client_control, server_control, m):
         # 定义
-        # m=2
         self.cluster_ds = clusterDataSetFrame
 
         # 单个client数据集大小
         self.N = len(clusterDataSetFrame)
+        self.m = m
         # print(self.N)
         self.local_epoch = local_max_epoch
         self.fuzzy_matrix = self.init_fuzzy_matrix(self.N, c)
 
         self.init_models = np.array(init_models)
         self.models = init_models
-
-
 
         self.cluster_num = c
         self.features = cluster_features
@@ -42,6 +41,8 @@ class client(object):
         self.client_control_after = np.zeros(shape=(c, len(cluster_features)))
         # self.client_control = self.client_control_after
         self.delta_c = np.zeros(shape=(c, len(cluster_features)))
+
+        self.support_centers = init_models
 
 
         # 单个client运行FCM,更新models，u
@@ -73,6 +74,13 @@ class client(object):
             fuzzy_matrix.append(norm_random_list)
         return fuzzy_matrix
 
+
+    def preInit(self):
+
+        df_T = self.cluster_ds.T
+        self.support_centers, _, _, _, _, _, _ = cmeans(df_T, c=self.cluster_num, m=self.m, error=0.0005, maxiter=100)
+
+
     def localClustering(self):
         # print("新一轮：")
         # print(self.models)
@@ -80,16 +88,12 @@ class client(object):
         # print(self.server_control)
         for k in range(0, self.local_epoch):
 
-            self.fuzzy_matrix = update_fuzzy_matrix(self.cluster_ds, self.fuzzy_matrix, self.N, self.cluster_num, 2, self.models)
+            self.fuzzy_matrix = update_fuzzy_matrix(self.cluster_ds, self.fuzzy_matrix, self.N, self.cluster_num, self.m, self.models)
             self.models = np.array(self.models)
-            # print(self.models)
-            # print("NN"*50)
             self.get_mini_batch_gradient()
             self.models = self.models - self.lr * (self.client_gradient - self.client_control + self.server_control)
 
-
         # 改进：
-
         self.client_control_after = self.client_control - self.server_control + (1/(self.local_epoch * self.lr)) * (self.init_models - self.models)
         self.delta_c = self.client_control_after - self.client_control
         self.client_control = self.client_control_after
@@ -103,26 +107,52 @@ class client(object):
         centers = self.models
         n_features = len(self.features)
         fm = self.fuzzy_matrix
-        # nomerator_List = [None] * c
-        # print(type(nomerator_List))
-        nomerator_List = np.zeros(shape=(c, n_features))
 
-        for s in range(0, c):
-            sum_list = np.zeros(n_features)
-            for j in range(0, n_features):
-                sumJ = 0
-                for k in range(0, n_sample):
-                    sample = df_values[k]
-                    sample = np.array(sample)
-                    distance = sample[j] - centers[s][j]
-                    res = math.pow(fm[k][s], 2) * distance
-                    # sigmoid是一个超参数 此时等于n/10
-                    temp = res / 50.5
-                    sumJ = sumJ + temp
-                sumJ = sumJ * (-2)
-                sum_list[j] = sumJ
-            nomerator_List[s] = sum_list
+        # 初始化 nomerator_List
+        nomerator_List = np.zeros((c, n_features))
+
+        # 预先计算 fm^m，避免每次都计算
+        fm_pow_m = np.power(fm, self.m)
+
+        # 对每个聚类中心进行操作
+        for k in range(c):
+            # 对每个特征维度进行计算
+            for j in range(n_features):
+                # 计算梯度的分子
+                distance = df_values[:, j] - centers[k][j]  # 向量化计算距离
+                res = fm_pow_m[:, k] * distance  # 通过向量化计算距离的加权结果
+
+                # 计算 sumJ
+                sumJ = np.sum(res) / n_sample
+                nomerator_List[k, j] = -2 * sumJ  # 更新 nomerator_List 中的值
+
+        # 将计算结果赋值给 client_gradient
         self.client_gradient = nomerator_List
+
+    def get_obj(self, c, res_centers):
+
+        m = self.m
+        n_sample = self.N
+        df_values = self.cluster_ds.values
+        vali_fuzzyMatrix = update_fuzzy_matrix(self.cluster_ds, self.fuzzy_matrix, self.N, self.cluster_num, m,
+                                               res_centers)
+        temp_c_obj = 0
+
+        for k in range(0, c):
+            res_k = res_centers[k]
+            # print(res_k)
+            temp_n_obj = 0
+            for s in range(0, n_sample):
+                sample = np.array(df_values[s])
+                # print('sample', sample)
+                dis = sum(np.power((sample - res_k), 2))
+                # print('dis', dis)
+                obj_s = np.power(vali_fuzzyMatrix[s][k], m) * dis
+                temp_n_obj = temp_n_obj + obj_s
+            # print('temp_n_obj',temp_n_obj)
+            temp_c_obj = temp_c_obj + temp_n_obj
+
+        return temp_c_obj
 
 
 # 更新隶属度矩阵，参考公式 (8)
@@ -142,10 +172,8 @@ def update_fuzzy_matrix(df, fuzzy_matrix, n_sample, c, m, cluster_centers):
             fuzzy_matrix[i][j] = float(1 / denominator)
     return fuzzy_matrix
 
-
-
 class ClientsGroup(object):
-    def __init__(self, dataSetName, isIID, numOfClients, c, init_models, local_epoch, server_iter, local_lr, client_control,  server_control):
+    def __init__(self, dataSetName, isIID, numOfClients, c, init_models, local_epoch, server_iter, local_lr, client_control,  server_control,m):
         self.data_set_name = dataSetName
         self.is_iid = isIID
         self.num_of_clients = numOfClients
@@ -154,53 +182,136 @@ class ClientsGroup(object):
         self.max_iter = local_epoch
         self.server_iter = server_iter
         self.lr = local_lr
-        # self.dev = dev
         self.clients_set = [None]*numOfClients
         self.client_control = client_control
         self.server_control = server_control
-        # self.test_data_loader = None
-        self.dataSetBalanceAllocation()
+        self.m = m
 
-    def dataSetBalanceAllocation(self):
+        if self.data_set_name == '2D':
+            if self.is_iid == 1:
+                self.syn_iid_data_Allocation()
 
+            else:
+                self.syn_non_iid_data_Allocation()
+        else:
+            if self.is_iid == 1:
+                self.dataSetAllocation()
+
+            else:
+                self.dataSetBalanceAllocation()
+
+    def dataSetAllocation(self):
 
         cluster_data = GetDataSet(self.data_set_name, self.is_iid).cluster_dataFrame
         cluster_features = GetDataSet(self.data_set_name, self.is_iid).features
 
-        # local_data = 505
-        # shard_size = 6
-        shard_size = len(cluster_data) // self.num_of_clients // 2
+        shard_size = len(cluster_data) // self.num_of_clients
         shards_id = np.random.permutation(len(cluster_data) // shard_size)
 
         for i in range(0, self.num_of_clients):
-            # 0 2 4 6...... 偶数
-            shards_id1 = shards_id[i * 2]
+            shards_idx = shards_id[i]
             # 0+1 = 1 2+1 = 3 .... 奇数
-            shards_id2 = shards_id[i * 2 + 1]
+            # shards_id2 = shards_id[i * 2 + 1]
 
-            data_shards1 = cluster_data[shards_id1 * shard_size: shards_id1 * shard_size + shard_size]
-            data_shards2 = cluster_data[shards_id2 * shard_size: shards_id2 * shard_size + shard_size]
+            data_shards = cluster_data[shards_idx * shard_size: shards_idx * shard_size + shard_size]
+            # data_shards2 = cluster_data[shards_id2 * shard_size: shards_id2 * shard_size + shard_size]
+            if shards_idx == 9:
+                data_shards = cluster_data[shards_idx * shard_size: shards_idx * shard_size + shard_size +
+                                                                    (len(cluster_data) - (
+                                                                            shards_idx * shard_size + shard_size))]
 
-            local_data = np.vstack(((data_shards1, data_shards2)))
+            local_data = data_shards
             local_data = DataFrame(local_data)
 
             someone = client(local_data, self.c, self.initmodels, self.max_iter,
-                             cluster_features, self.server_iter, self.lr, self.client_control, self.server_control)
+                             cluster_features, self.server_iter, self.lr, self.client_control,
+                             self.server_control,self.m)
+
+            self.clients_set[i] = someone
+
+    # 数据分片分配
+    def dataSetBalanceAllocation(self):
+
+        cluster_data = GetDataSet(self.data_set_name, self.is_iid).cluster_dataFrame
+        cluster_features = GetDataSet(self.data_set_name, self.is_iid).features
+
+        # local_data = 150
+        # shard_size = 6
+        # shard_size = len(cluster_data) // self.num_of_clients // 2
+        shard_size = len(cluster_data) // self.num_of_clients
+        # print('shard_size',shard_size)
+        shards_ids = np.random.permutation(len(cluster_data) // shard_size)
+        # shards_ids = np.arange(0, self.num_of_clients)
+        print('shards id', shards_ids)
+
+        for i in range(0, self.num_of_clients):
+            # 0 2 4 6...... 偶数
+            # shards_id1 = shards_id[i * 2]
+            # 0+1 = 1 2+1 = 3 .... 奇数
+            # shards_id2 = shards_id[i * 2 + 1]
+            shards_idx = shards_ids[i]
+
+            # data_shards1 = cluster_data[shards_id1 * shard_size: shards_id1 * shard_size + shard_size]
+            # data_shards2 = cluster_data[shards_id2 * shard_size: shards_id2 * shard_size + shard_size]
+            data_shards = cluster_data[shards_idx * shard_size: shards_idx * shard_size + shard_size]
+
+            if shards_idx == 9:
+                data_shards = cluster_data[shards_idx * shard_size: shards_idx * shard_size + shard_size +
+                                                                    (len(cluster_data) - (
+                                                                            shards_idx * shard_size + shard_size))]
+
+            # local_data = np.vstack(((data_shards1, data_shards2)))
+            local_data = data_shards
+            local_data = DataFrame(local_data)
+
+            someone = client(local_data, self.c, self.initmodels, self.max_iter,
+                             cluster_features, self.server_iter, self.lr, self.client_control,
+                             self.server_control,self.m)
+
+            self.clients_set[i] = someone
+
+    def syn_iid_data_Allocation(self):
+
+        self.num_of_clients = 5
+
+        for i in range(0, self.num_of_clients):
+
+            local_data = np.load(f'./data/clients_data/client_{i}_iid_data.npy')
+            local_data = DataFrame(local_data)
+
+            columns = list(local_data.columns)
+            features = columns[:len(columns) - 1]
+            ex_df = local_data[features]
+
+
+            someone = client(ex_df, self.c, self.initmodels, self.max_iter,
+                             features, self.server_iter, self.lr, self.client_control, self.server_control,self.m)
 
             self.clients_set[i] = someone
 
 
+    # Non-IID
+    def syn_non_iid_data_Allocation(self):
 
+        self.num_of_clients = 5
 
+        for i in range(0, self.num_of_clients):
+
+            local_data = np.load(f'./data/clients_data/client_{i}_non-iid_data.npy')
+            local_data = DataFrame(local_data)
+
+            columns = list(local_data.columns)
+            features = columns[:len(columns) - 1]
+            ex_df = local_data[features]
+
+            someone = client(ex_df, self.c, self.initmodels, self.max_iter,
+                             features, self.server_iter, self.lr, self.client_control, self.server_control,self.m)
+
+            self.clients_set[i] = someone
 
 
 if __name__=="__main__":
-     # MyClient=client()
-     # initcenter = [[1.2335556851032348, -0.21070683045092561, -1.2723902502406854, -0.10686097728935547],
-     #               [-0.6597260791145286, 0.5042917396898048, 0.5178196833363767, 2.475635174963594],
-     #               [1.8084322402343385, -1.188538845764442, -1.0990303014313072, 0.15537622465817208]]
-     # MyClients = ClientsGroup('housing', True, 40, 0.1, 3, initcenter, 5, 0)
-     # MyClient = MyClients.clients_set[0]
+
 
      None
 
