@@ -339,7 +339,6 @@ if __name__ == "__main__":
         server_control = server_control + args["cfraction"] * delta_c
 
         delta_data = 0
-        # use_trick = args['use_dency']
         server_step = args["Server_learning_rate"]
 
         delta_data = temp * Beta
