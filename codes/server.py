@@ -52,11 +52,14 @@ def init_FFCM_models(n_features, c, init_method='random'):
     n_features = n_features
     if init_method == 'random':
         for i in range(c):
+            # 在初始化聚类中心时，生成一个长度为 n_features 的随机向量（0~1），并作为一个新的聚类中心加入到列表 init_cluster_centers 中。
             init_cluster_centers.append(list(np.random.rand(n_features)))
     if init_method == 'multi_normal':
         mean = [0] * n_features
+        # 创建一个单位协方差矩阵
         cov = np.identity(n_features)
         for i in range(0, c):
+            # 使用 np.random.multivariate_normal(mean, cov) 从多元正态分布中采样
             init_cluster_centers.append(list(0.1 * np.random.multivariate_normal(mean, cov)))
     return init_cluster_centers
 

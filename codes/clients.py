@@ -75,9 +75,20 @@ class client(object):
         return fuzzy_matrix
 
 
+    # 每个客户端使用自己的本地数据运行一次完整的模糊C均值聚类算法，生成本地的聚类中心
     def preInit(self):
-
+        # self.cluster_ds 是客户端的本地数据，形状通常是 [样本数, 特征数]，cmeans 函数要求输入数据格式为 [特征数, 样本数]
         df_T = self.cluster_ds.T
+        # cmeans 函数返回值：cntr, u, u0, d, jm, p, fpc = cmeans(...)
+        '''
+        cntr: 聚类中心，形状为 (c, n_features)
+        u: 隶属度矩阵，形状为 (c, n_samples)
+        u0: 初始隶属度矩阵
+        d: 样本到聚类中心的距离矩阵
+        jm: 目标函数值的历史记录
+        p: 迭代次数
+        fpc: 模糊分区系数，衡量聚类效果的指标
+        '''
         self.support_centers, _, _, _, _, _, _ = cmeans(df_T, c=self.cluster_num, m=self.m, error=0.0005, maxiter=100)
 
 
@@ -229,7 +240,7 @@ class ClientsGroup(object):
 
             self.clients_set[i] = someone
 
-    # 数据分片分配
+    # 数据分片分配，将完整的数据集平衡地分配给多个客户端，实现 Non-IID 的数据分布。
     def dataSetBalanceAllocation(self):
 
         cluster_data = GetDataSet(self.data_set_name, self.is_iid).cluster_dataFrame
