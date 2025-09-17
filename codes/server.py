@@ -27,7 +27,7 @@ parser.add_argument('-E', '--epoch', type=int, default=50, help='local train epo
 parser.add_argument('-sr', "--Server_learning_rate", type=float, default=0.5, help="Server learning rate")
 parser.add_argument('-lr', "--local_learning_rate", type=float, default=0.2, help="local learning rate")
 
-parser.add_argument('-ncomm', '--num_comm', type=int, default=500, help='number of communications')
+parser.add_argument('-ncomm', '--num_comm', type=int, default=200, help='number of communications')
 # parser.add_argument('-sp', '--save_path', type=str, default='./checkpoints', help='the saving path of checkpoints')
 parser.add_argument('-iid', '--IID', type=int, default=0, help='the way to allocate data to clients')
 
@@ -62,6 +62,7 @@ def init_FFCM_models(n_features, c, init_method='random'):
             # 使用 np.random.multivariate_normal(mean, cov) 从多元正态分布中采样
             init_cluster_centers.append(list(0.1 * np.random.multivariate_normal(mean, cov)))
     return init_cluster_centers
+
 
 def nearest(point, cluster_centers):
     '''
@@ -144,10 +145,15 @@ def init_fuzzy_matrix(n_sample, c):
     # shape = [n_sample, c]
     fuzzy_matrix = []
     for i in range(n_sample):
+        # 生成随机数列表
         random_list = [random.random() for i in range(c)]
+        # 求和
         sum_of_random = sum(random_list)
+        # 归一化
         norm_random_list = [x / sum_of_random for x in random_list]
+        # 找到最大值的索引
         one_of_random_index = norm_random_list.index(max(norm_random_list))
+        # 硬分配, 独热编码, 后面隶属度矩阵更新再进行软分配
         for j in range(0, len(norm_random_list)):
             if (j == one_of_random_index):
                 norm_random_list[j] = 1
@@ -187,27 +193,31 @@ def vali(name, resultCenters, is_IID):
     c = args['number_of_cluster']
     m = args["fuzzy_index"]
 
+    """
+    init_fuzzy_matrix 函数只是用“硬分配”（独热编码）初始化了 fuzzy_matrix，此时每行只有一个 1，其余为 0。
+    但在聚类训练过程中，fuzzy_matrix 会被 update_fuzzy_matrix 函数多次更新。
+    update_fuzzy_matrix 的更新公式是模糊C均值（FCM）算法的标准公式，每次更新后，隶属度会变成 0~1 之间的实数，且每行加起来为 1，即“软分配”。
+    """
     fuzzy_matrix = init_fuzzy_matrix(n_sample, c)
     resultFuzzymatrix = update_fuzzy_matrix(valDf, fuzzy_matrix, n_sample, c, m, resultCenters)
     resultLabels = []
 
     for i in range(0, n_sample):
-        resultLabels.append(resultFuzzymatrix[i].index(max(resultFuzzymatrix[i])))
+        resultLabels.append(resultFuzzymatrix[i].index(max(resultFuzzymatrix[i])))  # 隶属度最高的加进去
 
     sum_cluster_distance = 0
     valDf = np.array(valDf)
-    min_cluster_center_distance = float("inf")
+    min_cluster_center_distance = float("inf")  # 初始化一个变量 min_cluster_center_distance，并赋值为正无穷大
     for i in range(0, c):
         for j in range(0, n_sample):
             sum_cluster_distance = sum_cluster_distance + resultFuzzymatrix[j][i] ** m * sum(
                 pow(valDf[j, :] - resultCenters[i, :], 2))
-
+    # 计算所有聚类中心两两之间的欧氏距离的最小值
     for i in range(c - 1):
         for j in range(i + 1, c):
             cluster_center_distance = sum(pow(resultCenters[i, :] - resultCenters[j, :], 2))
             if cluster_center_distance < min_cluster_center_distance:
                 min_cluster_center_distance = cluster_center_distance
-
 
     classLabels = np.array(classLabels)
     resultLabels = np.array(resultLabels)
@@ -215,7 +225,7 @@ def vali(name, resultCenters, is_IID):
     NMIScore = metrics.normalized_mutual_info_score(classLabels, resultLabels)
     ARIScore = metrics.adjusted_rand_score(classLabels, resultLabels)
     ACC = acc(classLabels, resultLabels)
-
+    # 计算联邦聚类中心与集中式聚类中心之间的距离差异（gap），并输出聚类评估指标。
     nonFed_result = np.load(f'./result/centers/{name}_centralized_centers.npy')
 
     gap = 0
@@ -224,9 +234,8 @@ def vali(name, resultCenters, is_IID):
         B = resultCenters[j]
         gap = gap + np.sqrt(sum(np.power((A - B), 2)))
 
-    print('ACC :', ACC, 'NMI Score :', NMIScore, "ARI Score :", ARIScore,  "gap:", gap)
+    print('ACC :', ACC, 'NMI Score :', NMIScore, "ARI Score :", ARIScore, "gap:", gap)
     return ACC, NMIScore, ARIScore, gap
-
 
 
 if __name__ == "__main__":
@@ -236,6 +245,7 @@ if __name__ == "__main__":
     roundNMI = float(0)
     m = args["fuzzy_index"]
     f_num = args['number_of_features']
+    # P 是本轮参与训练的客户端数量（这里为总客户端数乘以采样比例 cfraction）。
     P = int(copy.deepcopy(args['num_of_clients']) * args["cfraction"])
     data_set_name = args['cluster_dataSet_name']
     local_epoch = args['epoch']
@@ -269,14 +279,18 @@ if __name__ == "__main__":
             myClient.preInit()
             client_models = np.array(myClient.support_centers)
             if ii == 0:
+                # 第一次循环（ii == 0），直接用第一个客户端的中心作为 pre_init_centers 的初始值。
                 pre_init_centers = client_models
             else:
+                # 后续循环，把当前客户端的中心 client_models 和已有的 pre_init_centers 沿着行（axis=0）拼接起来，形成一个更大的中心集合。
                 pre_init_centers = np.concatenate((pre_init_centers, client_models), axis=0)
 
+        # 用 kmeans++ 算法（initcenters_with_kmeansPP）在所有客户端的本地中心集合上再聚一次，得到全局的初始聚类中心 global_init_centers。
         global_init_centers = initcenters_with_kmeansPP(c, pre_init_centers, 10)
         print("global iniit centers:", global_init_centers)
         np.save(f'./result/SC_{data_set_name}_co_init_centers.npy', global_init_centers)
 
+        # 同步全局中心到所有客户端
         for ii in range(0, num_of_clients):
             myClient = myClients[ii]
             myClient.models = global_init_centers
@@ -294,10 +308,14 @@ if __name__ == "__main__":
 
         print("The", current_iter, "round start：")
         print("--" * 50)
+        # 聚类数 c, 特征数 f_num
         temp = np.zeros(shape=(c, f_num))
 
+        # 缩放系数 Beta, P 是本轮参与训练的客户端数量
         Beta = 1 / P
+        # 创建另一个全为0的数组, 形状同上。这个变量用于累计所有被选中客户端的控制变量（client_control）的变化量。
         temp_c = np.zeros(shape=(c, f_num))
+        # 从所有客户端中随机采样P个客户端, 得到本轮参与训练的客户端编号列表。
         sample_list = random.sample(range(0, args['num_of_clients']), P)
         print('beta:', Beta)
 
@@ -325,6 +343,7 @@ if __name__ == "__main__":
             myClient.localClustering()
             client_models = np.array(myClient.models)
 
+            # 公式(17)
             delta_v = client_models - models
             temp_c = temp_c + myClient.delta_c
 
@@ -338,9 +357,14 @@ if __name__ == "__main__":
         # avg_client_time = sum_client_time / P
         # print("The average client computation time is: ", avg_client_time)
 
+        # 公式(20), Beta = 1 / P
         delta_c = temp_c * Beta
         server_control = server_control + args["cfraction"] * delta_c
 
+        """
+        服务器端全局模型（聚类中心）更新的核心步骤，对应于每一轮通信后，
+        服务器聚合客户端上传的模型更新，并用学习率进行全局中心的调整
+        """
         delta_data = 0
         server_step = args["Server_learning_rate"]
 
@@ -349,6 +373,12 @@ if __name__ == "__main__":
 
         print("The", current_iter, "round：", "**" * 50)
 
+        """
+        endCenters[:, -1]：取每个聚类中心的最后一个特征值，得到一个长度为聚类数的向量。
+        np.argsort(endCenters[:, -1])：对这个向量进行升序排序，返回排序后的索引。
+        endCenters[...]：用这些索引对所有聚类中心进行重排。
+        end_1 = time.perf_counter(): 记录当前时间，用于统计本轮聚类或通信的耗时。
+        """
         endCenters = models
         endCenters = endCenters[np.argsort(endCenters[:, -1]), :]
         end_1 = time.perf_counter()
@@ -357,7 +387,7 @@ if __name__ == "__main__":
         print('endCenters', endCenters)
 
         tempArray = np.array(endCenters)
-        roundACC,roundNMI,roundARI,roundGAP = vali(args['cluster_dataSet_name'], endCenters, args['IID'])
+        roundACC, roundNMI, roundARI, roundGAP = vali(args['cluster_dataSet_name'], endCenters, args['IID'])
 
         # cacul_Obj:
         global_obj = 0
@@ -427,8 +457,6 @@ if __name__ == "__main__":
 
     print("final centers：")
     print(endCenters)
-
-
 
 
 

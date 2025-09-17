@@ -74,23 +74,22 @@ class client(object):
             fuzzy_matrix.append(norm_random_list)
         return fuzzy_matrix
 
-
-    # 每个客户端使用自己的本地数据运行一次完整的模糊C均值聚类算法，生成本地的聚类中心
-    def preInit(self):
-        # self.cluster_ds 是客户端的本地数据，形状通常是 [样本数, 特征数]，cmeans 函数要求输入数据格式为 [特征数, 样本数]
-        df_T = self.cluster_ds.T
-        # cmeans 函数返回值：cntr, u, u0, d, jm, p, fpc = cmeans(...)
-        '''
-        cntr: 聚类中心，形状为 (c, n_features)
-        u: 隶属度矩阵，形状为 (c, n_samples)
-        u0: 初始隶属度矩阵
-        d: 样本到聚类中心的距离矩阵
-        jm: 目标函数值的历史记录
-        p: 迭代次数
-        fpc: 模糊分区系数，衡量聚类效果的指标
-        '''
-        self.support_centers, _, _, _, _, _, _ = cmeans(df_T, c=self.cluster_num, m=self.m, error=0.0005, maxiter=100)
-
+        # 每个客户端使用自己的本地数据运行一次完整的模糊C均值聚类算法，生成本地的聚类中心
+        def preInit(self):
+            # self.cluster_ds 是客户端的本地数据，形状通常是 [样本数, 特征数]，cmeans 函数要求输入数据格式为 [特征数, 样本数]
+            df_T = self.cluster_ds.T
+            # cmeans 函数返回值：cntr, u, u0, d, jm, p, fpc = cmeans(...)
+            '''
+            cntr: 聚类中心，形状为 (c, n_features)
+            u: 隶属度矩阵，形状为 (c, n_samples)
+            u0: 初始隶属度矩阵
+            d: 样本到聚类中心的距离矩阵
+            jm: 目标函数值的历史记录
+            p: 迭代次数
+            fpc: 模糊分区系数，衡量聚类效果的指标
+            '''
+            self.support_centers, _, _, _, _, _, _ = cmeans(df_T, c=self.cluster_num, m=self.m, error=0.0005,
+                                                            maxiter=100)
 
     def localClustering(self):
         # print("新一轮：")
@@ -100,11 +99,13 @@ class client(object):
         for k in range(0, self.local_epoch):
 
             self.fuzzy_matrix = update_fuzzy_matrix(self.cluster_ds, self.fuzzy_matrix, self.N, self.cluster_num, self.m, self.models)
+            # models 为中心点, 聚类数量和客户端数量都为 10 (合成数据集下)
             self.models = np.array(self.models)
             self.get_mini_batch_gradient()
+            # 公式(14)
             self.models = self.models - self.lr * (self.client_gradient - self.client_control + self.server_control)
 
-        # 改进：
+        # 改进：(公式16, 18)
         self.client_control_after = self.client_control - self.server_control + (1/(self.local_epoch * self.lr)) * (self.init_models - self.models)
         self.delta_c = self.client_control_after - self.client_control
         self.client_control = self.client_control_after
@@ -122,10 +123,10 @@ class client(object):
         # 初始化 nomerator_List
         nomerator_List = np.zeros((c, n_features))
 
-        # 预先计算 fm^m，避免每次都计算
+        # 预先计算 fm^m，避免每次都计算, m 为模糊指数
         fm_pow_m = np.power(fm, self.m)
 
-        # 对每个聚类中心进行操作
+        # 对每个聚类中心进行操作 (公式13)
         for k in range(c):
             # 对每个特征维度进行计算
             for j in range(n_features):
@@ -139,7 +140,7 @@ class client(object):
 
         # 将计算结果赋值给 client_gradient
         self.client_gradient = nomerator_List
-
+    # 公式(9) 计算聚类目标函数值
     def get_obj(self, c, res_centers):
 
         m = self.m
@@ -166,15 +167,17 @@ class client(object):
         return temp_c_obj
 
 
-# 更新隶属度矩阵，参考公式 (8)
+# 更新隶属度矩阵，参考公式 (8)  公式 (12) 吧
 def update_fuzzy_matrix(df, fuzzy_matrix, n_sample, c, m, cluster_centers):
     # 分母的指数项
     order = float(2 / (m - 1))
     # 遍历样本
     for i in range(n_sample):
-        # 单个样本
+        # 单个样本, .iloc[i] 表示取第 i 行的数据（i 从 0 开始）, 返回的是该行的所有特征值
         sample = list(df.iloc[i])
         # 计算更新公式的分母：样本减去聚类中心
+        # 将当前样本的每个特征值与第 j 个聚类中心的对应特征值做相减，得到一个“差值向量”
+        # operator.sub：是 Python 标准库 operator 模块中的减法函数，相当于 lambda a, b: a - b。
         distances = [np.linalg.norm(np.array(list(map(operator.sub, sample, cluster_centers[j])))) \
                      for j in range(c)]
         for j in range(c):
@@ -277,7 +280,7 @@ class ClientsGroup(object):
 
             someone = client(local_data, self.c, self.initmodels, self.max_iter,
                              cluster_features, self.server_iter, self.lr, self.client_control,
-                             self.server_control,self.m)
+                             self.server_control, self.m)
 
             self.clients_set[i] = someone
 
